@@ -1,78 +1,156 @@
-#!/usr/bin/env bash
-set -euo pipefail
+  fi
 
-color() {
-  local c="$1"; shift
-  case "$c" in
-    red) printf '\033[31m%s\033[0m\n' "$*" ;;
-    green) printf '\033[32m%s\033[0m\n' "$*" ;;
-    yellow) printf '\033[33m%s\033[0m\n' "$*" ;;
-    blue) printf '\033[36m%s\033[0m\n' "$*" ;;
-    *) echo "$*" ;;
+
+  case "${os_id}" in
+    debian)
+      [[ "${version}" -ge 8 ]]
+      ;;
+    ubuntu)
+      [[ "${version}" -ge 14 ]]
+      ;;
+    centos|rhel|rocky|almalinux)
+      [[ "${version}" -ge 6 ]]
+      ;;
+    *)
+      return 1
+      ;;
   esac
 }
 
-require_root() {
-  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    color red "[错误] 请使用 root 运行此脚本"
-    exit 1
+
+write_bbrplus_sysctl() {
+  local conf_file="/etc/sysctl.d/99-bbrplus.conf"
+  cat >"${conf_file}" <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbrplus
+EOF
+  sysctl --system >/dev/null
+  color green "[完成] 已写入 ${conf_file}"
+}
+
+
+parse_source_arg() {
+  local source="${DEFAULT_SOURCE}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --source)
+        shift
+        source="${1:-${DEFAULT_SOURCE}}"
+        ;;
+      --source=*)
+        source="${1#*=}"
+        ;;
+    esac
+    shift || true
+  done
+  echo "${source}"
+}
+
+
+ensure_cmd() {
+  local cmd="$1"
+  command -v "${cmd}" >/dev/null 2>&1 || {
+    color red "[错误] 缺少命令: ${cmd}"
+    return 1
+  }
+}
+
+
+update_grub_safely() {
+  if command -v update-grub >/dev/null 2>&1; then
+    update-grub || true
+  elif command -v grub2-mkconfig >/dev/null 2>&1 && [[ -d /boot/grub2 ]]; then
+    grub2-mkconfig -o /boot/grub2/grub.cfg || true
   fi
 }
 
-get_os_id() {
-  if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    echo "${ID:-unknown}"
-  else
-    echo "unknown"
-  fi
-}
 
-get_os_name() {
-  if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    echo "${PRETTY_NAME:-${NAME:-unknown}}"
-  else
-    echo "unknown"
-  fi
-}
 
-get_arch() {
-  uname -m
-}
-
-get_kernel() {
-  uname -r
-}
-
-supports_bbrplus() {
-  local available_cc
-  available_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-  echo " ${available_cc} " | grep -qi ' bbrplus '
-}
-
-is_supported_os() {
-  local os_id
+install_bbrplus_kernel_from_cx9208() {
+  local os_id arch_tag version kernel_version workdir
   os_id="$(get_os_id)"
-  [[ "${os_id}" == "debian" || "${os_id}" == "ubuntu" ]]
-}
+  arch_tag="$(get_arch_tag)"
+  version="$(get_os_version_major)"
+  kernel_version="4.14.129-bbrplus"
+  workdir="/tmp/bbrplus-cx9208.$$"
 
-print_basic_info() {
-  color blue "系统: $(get_os_name)"
-  color blue "架构: $(get_arch)"
-  color blue "内核: $(get_kernel)"
+  color yellow "[警告] 你正在使用 legacy 源: cx9208/Linux-NetSpeed"
+  color yellow "[警告] 该源较老，仅建议测试环境使用。"
+  echo
+
+  mkdir -p "${workdir}"
+  cd "${workdir}"
+
+  if is_debian_like; then
+    ensure_cmd wget
+    ensure_cmd dpkg
+
+    local header_pkg="linux-headers-${kernel_version}.deb"
+    local image_pkg="linux-image-${kernel_version}.deb"
+    local base_url="${CX9208_BASE_URL}/bbrplus/debian-ubuntu/${arch_tag}"
+
+    color blue "[信息] 开始下载 Debian/Ubuntu 历史内核包..."
+    wget -O "${header_pkg}" "${base_url}/${header_pkg}"
+    wget -O "${image_pkg}" "${base_url}/${image_pkg}"
+
+    color blue "[信息] 开始安装内核包（保留旧内核，不自动删除）..."
+    dpkg -i "${header_pkg}"
+    dpkg -i "${image_pkg}"
+    update_grub_safely
+  elif is_centos_like; then
+    ensure_cmd wget
+    ensure_cmd yum
+
+    local rpm_pkg="kernel-${kernel_version}.rpm"
+    local major="${version}"
+    local base_url="${CX9208_BASE_URL}/bbrplus/centos/${major}"
+
+    color blue "[信息] 开始下载 CentOS 历史内核包..."
+    wget -O "${rpm_pkg}" "${base_url}/${rpm_pkg}"
+
+    color blue "[信息] 开始安装内核包（保留旧内核，不自动删除）..."
+    yum install -y "./${rpm_pkg}"
+    update_grub_safely
+  else
+    color red "[错误] cx9208 源当前仅处理 Debian/Ubuntu/CentOS 风格系统。"
+    return 2
+  fi
+
+  color green "[完成] 历史 BBRplus 内核包安装流程已执行。"
+  color yellow "[提醒] 本脚本没有删除旧内核。"
+  color yellow "[提醒] 你需要重启进入新内核后，再重新执行 install.sh 启用 bbrplus。"
+  return 0
 }
 
 install_bbrplus_kernel_stub() {
-  color yellow "[提示] 当前准备进入安装支持 BBRplus 的内核流程。"
-  echo
-  echo "这里建议你后续接入你自己信任的 BBRplus 内核来源。"
-  echo "例如："
-  echo "- 你自己维护的 .deb 包下载地址"
-  echo "- 你自己的 GitHub Release"
-  echo "- 固定版本的内核安装脚本"
-  echo
-  echo "当前版本为了安全，不默认下载未知第三方内核。"
-  echo "但保留了完整流程入口，方便你后续补上。"
-  return 10
+  local source="${1:-${DEFAULT_SOURCE}}"
+
+  color blue "[信息] 当前安装源: ${source}"
+
+  if ! supports_bbrplus_install_policy; then
+    color red "[错误] 当前系统不在内置 BBRplus 安装策略范围内。"
+    echo "支持策略参考 cx9208 旧逻辑，当前仅放行："
+    echo "- Debian >= 8"
+    echo "- Ubuntu >= 14"
+    echo "- CentOS/RHEL系 >= 6"
+    echo "- 架构: x64/x32"
+    return 2
+  fi
+
+  case "${source}" in
+    safe)
+      color yellow "[提示] safe 模式只做兼容判断，不自动下载历史内核。"
+      echo "如果你确认要使用历史源，请执行："
+      echo "bash install.sh --source cx9208"
+      return 10
+      ;;
+    cx9208)
+      install_bbrplus_kernel_from_cx9208
+      ;;
+    *)
+      color red "[错误] 未知安装源: ${source}"
+      echo "当前支持的 --source: safe, cx9208"
+      return 3
+      ;;
+  esac
 }
