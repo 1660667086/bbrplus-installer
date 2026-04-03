@@ -5,17 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
-CONF_FILE="/etc/sysctl.d/99-bbrplus.conf"
-
 apply_bbrplus() {
-  cat >"${CONF_FILE}" <<'EOF'
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbrplus
-EOF
-
-  sysctl --system >/dev/null
-
-  color green "[完成] 已写入 ${CONF_FILE}"
+  write_bbrplus_sysctl
   color green "[完成] 已尝试启用 bbrplus"
   echo
   sysctl net.core.default_qdisc || true
@@ -24,6 +15,9 @@ EOF
 
 main() {
   require_root
+  local source
+  source="$(parse_source_arg "$@")"
+
   print_basic_info
   echo
 
@@ -36,7 +30,7 @@ main() {
   color yellow "[提示] 当前内核暂不支持 bbrplus。"
 
   if ! is_supported_os; then
-    color red "[错误] 当前仅内置 Debian / Ubuntu 流程，其它系统请自行扩展。"
+    color red "[错误] 当前仅内置 Debian / Ubuntu / CentOS 风格流程，其它系统请自行扩展。"
     exit 2
   fi
 
@@ -46,12 +40,12 @@ main() {
   color yellow "[提醒] 安装新内核后，通常需要重启进入新内核，再重新执行本脚本。"
   echo
 
-  if install_bbrplus_kernel_stub; then
+  if install_bbrplus_kernel_stub "${source}"; then
     color green "[完成] 内核安装流程执行结束。"
   else
     code=$?
     if [[ ${code} -eq 10 ]]; then
-      color yellow "[待补充] 你需要在 lib.sh 的 install_bbrplus_kernel_stub 中接入自己的 BBRplus 内核来源。"
+      color yellow "[待确认] 当前是安全模式，未自动下载历史内核源。"
       exit 10
     fi
     exit ${code}
