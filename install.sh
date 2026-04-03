@@ -1,31 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+
 CONF_FILE="/etc/sysctl.d/99-bbrplus.conf"
-
-color() {
-  local c="$1"; shift
-  case "$c" in
-    red) printf '\033[31m%s\033[0m\n' "$*" ;;
-    green) printf '\033[32m%s\033[0m\n' "$*" ;;
-    yellow) printf '\033[33m%s\033[0m\n' "$*" ;;
-    blue) printf '\033[36m%s\033[0m\n' "$*" ;;
-    *) echo "$*" ;;
-  esac
-}
-
-require_root() {
-  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    color red "[错误] 请使用 root 运行此脚本"
-    exit 1
-  fi
-}
-
-supports_bbrplus() {
-  local available_cc
-  available_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-  echo " ${available_cc} " | grep -qi ' bbrplus '
-}
 
 apply_bbrplus() {
   cat >"${CONF_FILE}" <<'EOF'
@@ -42,22 +22,40 @@ EOF
   sysctl net.ipv4.tcp_congestion_control || true
 }
 
-require_root
+main() {
+  require_root
+  print_basic_info
+  echo
 
-color blue "[信息] 检测当前内核是否支持 bbrplus..."
-if supports_bbrplus; then
-  color green "[OK] 当前内核已支持 bbrplus，开始启用。"
-  apply_bbrplus
-else
-  color yellow "[提示] 当前内核不支持 bbrplus。"
-  echo ""
-  echo "本脚本不会粗暴卸载旧内核。"
-  echo "推荐流程是："
-  echo "1. 安装带 BBRplus 的新内核"
-  echo "2. 保留旧内核作为回滚"
-  echo "3. 重启进入新内核"
-  echo "4. 再次执行本脚本启用 bbrplus"
-  echo ""
-  echo "你后续可以把这里扩展成：自动下载并安装特定发行版的 BBRplus 内核包。"
-  exit 2
-fi
+  if supports_bbrplus; then
+    color green "[OK] 当前内核已支持 bbrplus，开始启用。"
+    apply_bbrplus
+    exit 0
+  fi
+
+  color yellow "[提示] 当前内核暂不支持 bbrplus。"
+
+  if ! is_supported_os; then
+    color red "[错误] 当前仅内置 Debian / Ubuntu 流程，其它系统请自行扩展。"
+    exit 2
+  fi
+
+  echo
+  color blue "[信息] 准备进入支持 BBRplus 内核的安装流程。"
+  color yellow "[提醒] 本项目不会主动卸载旧内核。"
+  color yellow "[提醒] 安装新内核后，通常需要重启进入新内核，再重新执行本脚本。"
+  echo
+
+  if install_bbrplus_kernel_stub; then
+    color green "[完成] 内核安装流程执行结束。"
+  else
+    code=$?
+    if [[ ${code} -eq 10 ]]; then
+      color yellow "[待补充] 你需要在 lib.sh 的 install_bbrplus_kernel_stub 中接入自己的 BBRplus 内核来源。"
+      exit 10
+    fi
+    exit ${code}
+  fi
+}
+
+main "$@"
